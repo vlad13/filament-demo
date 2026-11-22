@@ -1,0 +1,155 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  laravel-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.5'
+          extensions: mbstring, pdo, pdo_sqlite, bcmath, opcache, zip, gd, intl
+          coverage: none
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache composer dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Copy environment file
+        run: cp .env.example .env
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate application key
+        run: php artisan key:generate
+
+      - name: Run tests
+        run: ./vendor/bin/phpunit --no-coverage
+
+  docker:
+    if: github.event_name == 'push'
+    needs: laravel-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: liberu/ecommerce
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build first, publish only once the image has been shown to work. This job
+      # used to build and push in one step, so "green" meant nothing more than
+      # `docker build` exiting 0 — and two faults rode that all the way to the
+      # registry: the image could not start PHP at all (opcache.file_cache was set
+      # to a number, so every invocation was fatal), and it served a vite manifest
+      # naming 32 assets while containing none of them. Both were invisible to a
+      # build-exit-code check. The smoke step below is what those needed.
+      - name: Build Docker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: liberu/ecommerce:ci-smoke
+          cache-from: type=registry,ref=liberu/ecommerce:buildcache
+          cache-to: type=registry,ref=liberu/ecommerce:buildcache,mode=max
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+
+          # PHP must actually start, and the framework must boot. This is the
+          # check that opcache.file_cache=60 would have failed for two years.
+          docker run --rm --entrypoint php liberu/ecommerce:ci-smoke \
+            /var/www/html/artisan --version
+
+          # Every required module must be in the image and valid, including those
+          # Composer installs outside vendor/, which COPY . . cannot supply.
+          docker run --rm --entrypoint php liberu/ecommerce:ci-smoke \
+            /var/www/html/artisan module:validate --strict
+          docker run --rm --entrypoint php liberu/ecommerce:ci-smoke \
+            /var/www/html/artisan theme:validate
+
+          # Every asset the vite manifest promises must be in the image. Both
+          # layouts call @vite, so a manifest without its assets is a storefront
+          # served with no CSS and no JS.
+          rm -rf /tmp/build-check
+          cid=$(docker create liberu/ecommerce:ci-smoke)
+          docker cp "$cid:/var/www/html/public/build" /tmp/build-check
+          docker rm -f "$cid" > /dev/null
+
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path("/tmp/build-check")
+          manifest = root / "manifest.json"
+          if not manifest.is_file():
+              sys.exit("FAIL: no vite manifest in the image")
+
+          entries = json.loads(manifest.read_text())
+          if not entries:
+              sys.exit("FAIL: vite manifest is empty")
+
+          missing = [e["file"] for e in entries.values() if not (root / e["file"]).is_file()]
+          if missing:
+              sys.exit(f"FAIL: {len(missing)}/{len(entries)} assets in the manifest "
+                       f"are missing from the image, e.g. {missing[:5]}")
+
+          print(f"ok: {len(entries)} assets present, all referenced files exist")
+          PY
+
+      # Reuses the layers just built and verified; this only uploads them.
+      - name: Push Docker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=liberu/ecommerce:buildcache

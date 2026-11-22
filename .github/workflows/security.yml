@@ -1,0 +1,83 @@
+name: Security
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Removed the php-insights and phpcpd jobs: phpinsights is not a project
+  # dependency (the job errored on every run) and its quality thresholds don't
+  # reflect the codebase, and sebastian/phpcpd is abandoned and doesn't install
+  # on PHP 8.5. Reinstate as require-dev tools with realistic thresholds if the
+  # team wants them gating.
+  security:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.5'
+
+      # --locked audits composer.lock directly. Without it, `composer audit` looks
+      # for an installed vendor/ tree, which no step here creates, so the job died
+      # with "No installed packages found" on every run — red since at least
+      # 2026-07-14 and reporting nothing. Auditing the lock is also what we want:
+      # it checks the versions that actually get deployed, and needs no install.
+      - name: Run Composer security audit
+        # Rector requires the abandoned rule-doc-generator contracts package.
+        # Report abandonment while still failing on every security advisory.
+        run: composer audit --locked --no-interaction --abandoned=report
+
+  # Split from the Composer job rather than bolted on as a step: the two need
+  # different toolchains (PHP vs Node), they run in parallel, and a JS advisory
+  # reports as a JS failure instead of turning up under a PHP-shaped job name.
+  # The extra checkout costs a couple of seconds.
+  npm-security:
+    name: npm Dependency Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # package.json declares no engines. 20 matches the php-fpm image that
+          # actually builds these assets (v20.20.2) and clears Vite 8's >= 20.19
+          # floor. No cache: npm — nothing installs here, so there's nothing to
+          # cache.
+          node-version: '26'
+
+      # --package-lock-only is the npm mirror of `composer audit --locked` above:
+      # audit the lockfile, install nothing. That keeps the whole npm ci
+      # lockfile-out-of-sync failure mode out of the security gate (the build
+      # workflow is where a desync should shout), and the lock is what ships
+      # anyway. npm 10 already falls back to the lock when node_modules is
+      # absent; the flag says so out loud instead of leaning on that fallback —
+      # an unstated install assumption is what left the Composer job red and
+      # silent for months.
+      #
+      # --omit=dev scopes this to what reaches a browser. The devDependencies
+      # are the build chain (vite, tailwind, postcss) and their advisories tend
+      # to be dev-server noise that's unfixable until upstream moves — a gate
+      # that cries wolf gets ignored, which is how the jobs above died. No
+      # --audit-level in exchange: within the handful of shipped packages we
+      # fail on anything, because flowbite/preline render user-facing markup and
+      # XSS routinely rates "moderate", which --audit-level=high would wave
+      # through. Narrow scope, zero tolerance inside it.
+      - name: Run npm security audit
+        run: npm audit --omit=dev --package-lock-only

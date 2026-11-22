@@ -1,0 +1,124 @@
+<?php
+
+namespace Tests\Feature;
+
+use PHPUnit\Framework\Attributes\DataProvider;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Session;
+use JoelButcher\Socialstream\Providers;
+use Laravel\Fortify\Features as FortifyFeatures;
+use Laravel\Socialite\Facades\Socialite;
+use Laravel\Socialite\Two\User;
+use Mockery;
+use Tests\TestCase;
+
+class SocialstreamRegistrationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_socialstream_config_has_social_media_providers(): void
+    {
+        $providers = config('socialstream.providers', []);
+
+        $this->assertNotEmpty($providers, 'socialstream.providers must not be empty');
+
+        $expected = [
+            Providers::bitbucket(),
+            Providers::facebook(),
+            Providers::github(),
+            Providers::gitlab(),
+            Providers::google(),
+            Providers::linkedin(),
+            Providers::linkedinOpenId(),
+            Providers::slack(),
+            Providers::twitterOAuth2(),
+        ];
+
+        foreach ($expected as $provider) {
+            $this->assertTrue(
+                Providers::enabled($provider),
+                "Provider [{$provider}] should be enabled in socialstream config."
+            );
+        }
+
+        $this->assertFalse(
+            Providers::enabled(Providers::twitterOAuth1()),
+            'Twitter OAuth 1.0 must not be enabled (requires live API keys even for redirect).'
+        );
+    }
+
+    #[DataProvider('socialiteProvidersDataProvider')]
+    public function test_users_get_redirected_correctly(string $provider): void
+    {
+        if (! Providers::enabled($provider)) {
+            $this->markTestSkipped("Registration support with the $provider provider is not enabled.");
+        }
+
+        config(["services.$provider" => [
+            'client_id' => 'client-id',
+            'client_secret' => 'client-secret',
+            'redirect' => "http://localhost/oauth/$provider/callback",
+        ]]);
+
+        $response = $this->get("/oauth/$provider");
+        $response->assertRedirectContains($provider);
+    }
+
+    #[DataProvider('socialiteProvidersDataProvider')]
+    public function test_users_can_register_using_socialite_providers(string $socialiteProvider): void
+    {
+        if (! FortifyFeatures::enabled(FortifyFeatures::registration())) {
+            $this->markTestSkipped('Registration support is not enabled.');
+        }
+
+        if (! Providers::enabled($socialiteProvider)) {
+            $this->markTestSkipped("Registration support with the $socialiteProvider provider is not enabled.");
+        }
+
+        $user = (new User())
+            ->map([
+                'id' => 'abcdefgh',
+                'nickname' => 'Jane',
+                'name' => 'Jane Doe',
+                'email' => 'janedoe@example.com',
+                'avatar' => null,
+                'avatar_original' => null,
+            ])
+            ->setToken('user-token')
+            ->setRefreshToken('refresh-token')
+            ->setExpiresIn(3600);
+
+        $providerClassName = match ($socialiteProvider) {
+            'linkedin-openid' => 'Laravel\\Socialite\\Two\\LinkedInOpenIdProvider',
+            'twitter-oauth-2' => 'Laravel\\Socialite\\Two\\TwitterProvider',
+            default => 'Laravel\\Socialite\\Two\\'.ucfirst($socialiteProvider).'Provider',
+        };
+
+        $provider = Mockery::mock($providerClassName);
+        $provider->shouldReceive('user')->once()->andReturn($user);
+
+        Socialite::shouldReceive('driver')->once()->with($socialiteProvider)->andReturn($provider);
+
+        Session::put('socialstream.previous_url', route('register'));
+
+        $response = $this->get("/oauth/$socialiteProvider/callback");
+
+        $this->assertAuthenticated();
+        $response->assertRedirect(config('socialstream.redirects.register', config('socialstream.home', '/dashboard')));
+    }
+
+    public static function socialiteProvidersDataProvider(): array
+    {
+        return [
+            [Providers::bitbucket()],
+            [Providers::facebook()],
+            [Providers::github()],
+            [Providers::gitlab()],
+            [Providers::google()],
+            [Providers::linkedin()],
+            [Providers::linkedinOpenId()],
+            [Providers::slack()],
+            [Providers::twitterOAuth2()],
+        ];
+    }
+}

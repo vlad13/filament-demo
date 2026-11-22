@@ -1,0 +1,134 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Exceptions\InsufficientStockException;
+use App\Exceptions\InvalidProductConfigurationException;
+use App\Models\Product;
+use App\Services\CartService;
+use App\Services\CouponService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Session;
+
+/**
+ * The storefront cart. Backed by `cart_items` for guests and accounts alike —
+ * see {@see CartService}, which is the only door onto that store.
+ *
+ * This controller used to keep the cart in the session and mirror it into
+ * `cart_items` for signed-in shoppers on every write. The mirror is gone: there
+ * is one cart, and the API, the GraphQL mutation and this controller all read
+ * and write it.
+ */
+class CartController extends Controller
+{
+    public function __construct(private CartService $cart) {}
+
+    public function add(Request $request, Product $product)
+    {
+        // Guard the quantity — a negative value passes the `inventory_count < $quantity`
+        // check and, at checkout, drags the total down and INCREMENTS stock via the
+        // atomic decrement. (add() previously skipped the min:1 guard that update() has.)
+        $request->validate(['quantity' => 'nullable|integer|min:1']);
+        $quantity = (int) $request->input('quantity', 1);
+
+        if (! $product->isActive()) {
+            return redirect()->back()->with('error', 'This product is not available.');
+        }
+
+        // Pay-what-you-want: the shopper names the price, at or above the merchant's minimum.
+        $unitPrice = null;
+        if ($product->isDonationBased()) {
+            $unitPrice = (float) $request->validate([
+                'price' => ['required', 'numeric', 'min:'.max(0, (float) $product->minimum_price), 'max:1000000'],
+            ])['price'];
+        }
+
+        $request->validate(['options' => 'nullable|array', 'options.*' => 'integer', 'variant_id' => 'nullable|integer']);
+
+        try {
+            $this->cart->add($product, $quantity, $request->input('options', []), $unitPrice, $request->input('variant_id'));
+        } catch (InsufficientStockException) {
+            return redirect()->back()->with('error', 'Not enough inventory available.');
+        } catch (InvalidProductConfigurationException $e) {
+            return redirect()->back()->withInput()->with('error', $e->getMessage());
+        }
+
+        return redirect()->back()->with('success', 'Product added to cart successfully!');
+    }
+
+    public function index()
+    {
+        return view('cart.index');
+    }
+
+    public function update(Request $request, int $line)
+    {
+        $quantity = (int) $request->input('quantity', 1);
+
+        if ($quantity < 1) {
+            return redirect()->back()->with('error', 'Quantity must be at least 1.');
+        }
+
+        $item = $this->cart->line($line);
+        if ($item === null) {
+            return redirect()->back()->with('error', 'Product not found in cart.');
+        }
+
+        try {
+            $this->cart->setQuantity($item, $quantity);
+        } catch (InsufficientStockException) {
+            return redirect()->back()->with('error', 'Not enough inventory available.');
+        }
+
+        return redirect()->back()->with('success', 'Cart updated successfully!');
+    }
+
+    public function remove(int $line)
+    {
+        if (! $this->cart->remove($line)) {
+            return redirect()->back()->with('error', 'Product not found in cart.');
+        }
+
+        return redirect()->back()->with('success', 'Product removed from cart successfully!');
+    }
+
+    public function clear()
+    {
+        $this->cart->clear();
+        Session::forget('coupon');
+
+        return redirect()->back()->with('success', 'Cart cleared successfully!');
+    }
+
+    public function applyCoupon(Request $request, CouponService $couponService)
+    {
+        $request->validate([
+            'coupon_code' => 'required|string',
+        ]);
+
+        if ($this->cart->isEmpty()) {
+            return redirect()->back()->with('error', 'Your cart is empty.');
+        }
+
+        $result = $couponService->validateAndApplyCoupon($request->coupon_code, $this->cart->subtotal());
+
+        if ($result['valid']) {
+            Session::put('coupon', [
+                'code' => $request->coupon_code,
+                'discount' => $result['discount'],
+                'coupon_id' => $result['coupon']->id,
+            ]);
+
+            return redirect()->back()->with('success', $result['message']);
+        }
+
+        return redirect()->back()->with('error', $result['error']);
+    }
+
+    public function removeCoupon()
+    {
+        Session::forget('coupon');
+
+        return redirect()->back()->with('success', 'Coupon removed successfully!');
+    }
+}

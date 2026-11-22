@@ -1,0 +1,135 @@
+<?php
+
+namespace App\Actions\Fortify;
+
+use Illuminate\Validation\ValidationException;
+use Illuminate\Database\QueryException;
+use Spatie\Permission\Exceptions\RoleDoesNotExist;
+use App\Models\Team;
+use App\Models\User;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
+use Laravel\Fortify\Contracts\CreatesNewUsers;
+use Exception;
+
+class CreateNewUser implements CreatesNewUsers
+{
+    use PasswordValidationRules;
+
+    /**
+     * Validate and create a newly registered user.
+     *
+     * @param array<string, string> $input
+     * @throws ValidationException
+     * @throws Exception
+     */
+    public function create(array $input): User
+    {
+        try {
+            Validator::make($input, [
+                'name'  => ['required', 'string', 'max:255'],
+                'email' => [
+                    'required',
+                    'string',
+                    'email',
+                    'max:255',
+                    Rule::unique(User::class),
+                ],
+                'password' => $this->passwordRules(),
+                // 'role' => ['required', 'string', Rule::in(['tenant', 'buyer', 'seller', 'landlord', 'contractor'])],
+            ])->validate();
+
+           
+            // A public registration produces a shopper: a user, and nothing else.
+            //
+            // This used to attach every registrant to Team::first() — the merchant's
+            // own team, seeded by DefaultTeamSeeder and owned by the admin — and then
+            // assign a `staff` role. Both were wrong:
+            //
+            //  - Team membership is what gates /app (see User::canAccessPanel), and
+            //    teams are created through TeamPolicy::create, which requires the
+            //    `create_store` permission. Handing one out at signup bypassed that
+            //    gate and dropped strangers inside the store's tenant.
+            //  - Nothing consumes `staff`. RolesSeeder stopped creating it in cf711cb
+            //    without touching this caller, so every registration has been throwing
+            //    RoleDoesNotExist since — and on an unseeded database Team::first()
+            //    returned null and fatally errored one line earlier.
+            //
+            // Shoppers have their own account area on the storefront (/orders,
+            // /wishlist, /invoices, /payment_methods). They do not need the panel.
+            $user = User::create([
+                'name' => $input['name'],
+                'email' => $input['email'],
+                'password' => Hash::make($input['password']),
+            ]);
+            // $user = DB::transaction(function () use ($input) {
+            //     return tap(,
+            //     , function (User $user) use ($input) {
+            //         $team = $this->assignOrCreateTeam($user);
+            //         $user->switchTeam($team);
+            //         setPermissionsTeamId($team->id);
+            //         $user->assignRole($input['role']);
+            //     });
+            // });
+
+            // Log::info('User created successfully', [
+            //     'user_id' => $user->id,
+            //     'email' => $user->email,
+            //     'role' => $input['role'],
+            // ]);
+    
+            return $user;
+        } catch (ValidationException $e) {
+            Log::error('User creation validation failed', [
+                'errors' => $e->errors(),
+                // ponytail: allowlist, not a denylist. 'password_confirmation' holds the
+                // same plaintext as 'password'; a denylist leaks every field we forget.
+                'input' => Arr::only($input, ['name', 'email']),
+            ]);
+            throw $e;
+        } catch (QueryException $e) {
+            // No 'message'/'bindings': QueryException::formatMessage() interpolates the
+            // bindings into the message, so both carry the bcrypt hash. getSql() keeps
+            // its '?' placeholders and is safe.
+            Log::error('Database error during user creation', [
+                'code' => $e->getCode(),
+                'sql' => $e->getSql(),
+            ]);
+            throw new Exception($this->getDatabaseErrorMessage($e));
+        } catch (RoleDoesNotExist $e) {
+            Log::error('Invalid role specified during user creation', [
+                'role' => $input['role'] ?? 'not provided',
+                'message' => $e->getMessage(),
+            ]);
+            throw new Exception('Invalid role specified. Please choose a valid role.');
+        } catch (Exception $e) {
+            Log::error('Unexpected error during user creation', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'exception_class' => get_class($e),
+            ]);
+            throw new Exception('An unexpected error occurred. Please try again later.');
+        }
+    }
+    
+    private function getDatabaseErrorMessage(QueryException $e): string
+    {
+        $errorCode = $e->getCode();
+        $errorMessage = $e->getMessage();
+    
+        if (strpos($errorMessage, 'Duplicate entry') !== false) {
+            return 'A user with this email already exists. Please use a different email address.';
+        } elseif ($errorCode == 1045) {
+            return 'Database access denied. Please contact the administrator.';
+        } elseif ($errorCode == 2002) {
+            return 'Unable to connect to the database. Please try again later.';
+        } else {
+            return 'A database error occurred. Please try again later. Error code: ' . $errorCode;
+        }
+    }
+
+}

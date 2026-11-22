@@ -1,0 +1,14 @@
+2026/11/16 23:32:51 [error] 62850#62850: *54 FastCGI sent in stderr: "PHP message: PHP Fatal error:  Uncaught ErrorException: Cannot modify header information - headers already sent by (output started at /var/www/live/php/ecommerce-laravel-filament-demo/routes/web.php:45) in /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php:328
+Stack trace:
+#0 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/laravel/framework/src/Illuminate/Foundation/Bootstrap/HandleExceptions.php(267): Illuminate\Foundation\Bootstrap\HandleExceptions->handleError()
+#1 [internal function]: Illuminate\Foundation\Bootstrap\HandleExceptions->{closure:Illuminate\Foundation\Bootstrap\HandleExceptions::forwardsTo():266}()
+#2 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php(328): header()
+#3 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php(407): Symfony\Component\HttpFoundation\Response->sendHeaders()
+#4 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/larav...; PHP message: PHP Fatal error:  Uncaught ErrorException: Cannot modify header in" while reading upstream, client: 127.0.0.1, server: ecom-filament-demo.com, request: "GET /health HTTP/1.1", upstream: "fastcgi://unix:/run/php/php8.5-fpm.sock:", host: "ecom-filament-demo.com"
+2026/11/16 23:32:51 [error] 62850#62850: *54 FastCGI sent in stderr: "formation - headers already sent by (output started at /var/www/live/php/ecommerce-laravel-filament-demo/routes/web.php:45) in /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php:328
+Stack trace:
+#0 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/laravel/framework/src/Illuminate/Foundation/Bootstrap/HandleExceptions.php(267): Illuminate\Foundation\Bootstrap\HandleExceptions->handleError()
+#1 [internal function]: Illuminate\Foundation\Bootstrap\HandleExceptions->{closure:Illuminate\Foundation\Bootstrap\HandleExceptions::forwardsTo():266}()
+#2 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php(328): header()
+#3 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/symfony/http-foundation/Response.php(407): Symfony\Component\HttpFoundation\Response->sendHeaders()
+#4 /var/www/live/php/ecommerce-laravel-filament-demo/vendor/larav" while reading upstream, client: 127.0.0.1, server: ecom-filament-demo.com, request: "GET /health HTTP/1.1", upstream: "fastcgi://unix:/run/php/php8.5-fpm.sock:", host: "ecom-filament-demo.com"
